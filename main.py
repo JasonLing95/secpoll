@@ -12,6 +12,8 @@ from ratelimit import limits, sleep_and_retry
 import requests
 from threading import Thread
 from circuitbreaker import circuit
+import sys
+import signal
 
 from utils import (
     connect_db,
@@ -26,9 +28,6 @@ from get_logging import get_logger
 from sec_models import Manager
 
 logger = get_logger(__name__)
-
-# User Agent
-set_identity(os.getenv("SEC_IDENTITY", "example1.company@access.com"))
 
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "https://hc-ping.com/example")
 
@@ -57,7 +56,7 @@ class CikFileHandler(FileSystemEventHandler):
 
 @sleep_and_retry
 @limits(calls=10, period=1)  # Limit to 10 calls per second
-def process_filings(conn, seen: set, filings: CurrentFilings):
+def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set):
     for filing in filings:
         accession_number = filing.accession_number
         cik = filing.cik
@@ -145,70 +144,103 @@ def get_current_filings_with_circuit_breaker(form: str):
     return get_current_filings(form=form)
 
 
+class Application:
+    def __init__(self):
+        self.shutdown_flag = False
+        self.observer = None
+        self.health_thread = None
+        self.conn = None
+
+    def shutdown_handler(self, signum, frame):
+        logger.info("Shutdown signal received")
+        self.shutdown_flag = True
+        if self.observer:
+            self.observer.stop()
+        if self.health_thread:
+            self.health_thread.join(timeout=5)  # Wait max 5 seconds for health thread
+        if self.conn:
+            self.conn.close()
+        sys.exit(0)
+
+    def run(self):
+        # Register signal handlers
+        signal.signal(signal.SIGTERM, self.shutdown_handler)
+        signal.signal(signal.SIGINT, self.shutdown_handler)
+
+        # Initialize your application
+        self.health_thread = Thread(target=ping_healthchecks, daemon=True)
+        self.health_thread.start()
+
+        seen_filings = set()
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            '--cik', default=os.getenv('CIK_FILE', "ciks.txt"), help="Path to CIK file"
+        )
+        args = parser.parse_args()
+
+        logger.info(f"Reading: {args.cik}")
+
+        # initialize database connection
+        self.conn = connect_db(
+            db_host=os.getenv("DB_HOST", "localhost"),
+            db_port=os.getenv("DB_PORT", "5432"),
+            db_user=os.getenv("DB_USER", "postgres"),
+            db_password=os.getenv("DB_PASSWORD", ""),
+            db_name=os.getenv("DB_NAME", "sec"),
+        )
+
+        state = {'current_ciks': [], 'conn': self.conn}
+
+        def reload_ciks():
+            with open(args.cik, "r") as f:
+                ciks = [line.strip().zfill(10) for line in f if line.strip() if line]
+                state['current_ciks'] = ciks
+            logger.info(f"Reloaded {len(state['current_ciks'])} CIKs")
+            logger.info(
+                f"First CIK: {state['current_ciks'][0] if state['current_ciks'] else 'None'}"
+            )
+
+        reload_ciks()
+        relevant_ciks = set(state['current_ciks'])
+
+        event_handler = CikFileHandler(reload_ciks, args.cik)
+        self.observer = Observer()
+        watch_path = str(Path(args.cik).parent)
+        logger.info(f"Watching for changes in {watch_path}")
+        self.observer.schedule(event_handler, path=watch_path)
+        self.observer.start()
+
+        try:
+            while not self.shutdown_flag:
+                event_handler.check_for_changes()
+                get_current_entries_on_page.cache_clear()
+
+                new_filings = get_current_filings_with_circuit_breaker(form="13F-HR")
+                new_filings_a = get_current_filings_with_circuit_breaker(
+                    form="13F-HR/A"
+                )
+
+                process_filings(self.conn, seen_filings, new_filings, relevant_ciks)
+                process_filings(self.conn, seen_filings, new_filings_a, relevant_ciks)
+
+                logger.info("Sleeping for 5 seconds")
+                time.sleep(5)
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+        finally:
+            if self.observer:
+                self.observer.stop()
+                self.observer.join()
+            if self.conn:
+                self.conn.close()
+
+
 if __name__ == "__main__":
-    health_thread = Thread(target=ping_healthchecks, daemon=True)
-    health_thread.start()
 
-    # keep track of seen filings to avoid duplicates
-    seen_filings = set()
+    # User Agent
+    set_identity(os.getenv("SEC_IDENTITY", "example1.company@access.com"))
 
-    # Parse command line arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--cik', default=os.getenv('CIK_FILE', "ciks.txt"), help="Path to CIK file"
-    )
-    args = parser.parse_args()
-
-    logger.info(f"Reading: {args.cik}")
-    with open(args.cik, "r") as f:
-        ciks = f.read().splitlines()
-
-    # Initialise database connection
-    conn = connect_db(
-        db_host=os.getenv("DB_HOST", "localhost"),
-        db_port=os.getenv("DB_PORT", "5432"),
-        db_user=os.getenv("DB_USER", "postgres"),
-        db_password=os.getenv("DB_PASSWORD", ""),
-        db_name=os.getenv("DB_NAME", "sec"),
-    )
-
-    state = {'current_ciks': [], 'conn': conn}
-
-    def reload_ciks():
-        with open(args.cik, "r") as f:
-            state['current_ciks'] = [line.strip() for line in f if line.strip()]
-        logger.info(f"Reloaded {len(state['current_ciks'])} CIKs")
-
-    # Initial load
-    reload_ciks()
-
-    relevant_ciks = set(state['current_ciks'])
-
-    # Set up file watcher
-    event_handler = CikFileHandler(reload_ciks, args.cik)
-    observer = Observer()
-    watch_path = str(Path(args.cik).parent)
-    logger.info(f"Watching for changes in {watch_path}")
-    observer.schedule(event_handler, path=watch_path)
-    observer.start()
-
-    try:
-        while True:
-            event_handler.check_for_changes()
-
-            get_current_entries_on_page.cache_clear()
-
-            new_filings = get_current_filings(form="13F-HR")
-            new_filings_a = get_current_filings(form="13F-HR/A")
-
-            process_filings(conn, seen_filings, new_filings)
-            process_filings(conn, seen_filings, new_filings_a)
-            time.sleep(1)  # rate limit
-
-    except KeyboardInterrupt:
-        logger.info("Shutdown signal received, stopping observer...")
-    finally:
-        observer.stop()
-        observer.join()
-
-        state['conn'].close()
+    # Initialize and run the application
+    app = Application()
+    app.run()
