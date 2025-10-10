@@ -17,8 +17,10 @@ from utils import (
     find_namespaces,
     insert_holdings_batch,
 )
-from get_logging import get_logger
+import logging
+from get_logging import get_logger, configure_logging
 
+configure_logging(level=logging.INFO)
 logger = get_logger(__name__)
 
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "https://hc-ping.com/example")
@@ -41,7 +43,7 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
         cik = filing.cik
 
         # sec.gov CIKS have leading zeros, but our database does not
-        trimmed_cik = str(cik).lstrip('0')
+        trimmed_cik = str(cik).lstrip("0")
 
         # if not CIK we care about, skip!
         if trimmed_cik not in relevant_ciks:
@@ -68,15 +70,15 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
 
         for attachment in filing.attachments:
             if (
-                attachment.document.endswith('.xml')
-                and 'primary_doc' not in attachment.document
+                attachment.document.endswith(".xml")
+                and "primary_doc" not in attachment.document
             ):
                 logger.info(f"Processing XML attachment: {attachment.url}")
                 assert attachment.content
 
                 if isinstance(attachment.content, str):
                     # Convert string to bytes
-                    xml_content = attachment.content.encode('utf-8')
+                    xml_content = attachment.content.encode("utf-8")
                 else:
                     xml_content = attachment.content
 
@@ -84,17 +86,17 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
                     tree = etree.fromstring(xml_content)
                     nsmap = tree.nsmap
                     ns = {
-                        'ns': (
+                        "ns": (
                             nsmap[None]
                             if None in nsmap
                             else (
-                                nsmap['ns1']
+                                nsmap["ns1"]
                                 if "ns1" in nsmap
                                 else nsmap[find_namespaces(tree)[0]]
                             )
                         )
                     }
-                    info_tables = tree.xpath('//ns:infoTable', namespaces=ns)
+                    info_tables = tree.xpath("//ns:infoTable", namespaces=ns)
                     raw_holdings = gather_holdings_using_lxml(
                         info_tables,
                         ns,
@@ -110,7 +112,7 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
                     )
 
                 if raw_holdings:
-                    insert_holdings_batch(conn, raw_holdings, new_filing_id)
+                    insert_holdings_batch(conn, raw_holdings)
 
         seen.add(accession_number)
 
@@ -128,16 +130,19 @@ def ping_healthchecks():
 
 def main():
 
+    logger.info("--- SCRIPT EXECUTION STARTED ---")
+
     # Initialize your application
     health_thread = Thread(target=ping_healthchecks, daemon=True)
     health_thread.start()
+    logger.debug("Healthcheck thread started.")
 
     seen_filings = set()
 
     # parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--cik', default=os.getenv('CIK_FILE', "ciks.txt"), help="Path to CIK file"
+        "--cik", default=os.getenv("CIK_FILE", "ciks.txt"), help="Path to CIK file"
     )
     args = parser.parse_args()
 
@@ -162,6 +167,8 @@ def main():
     except FileNotFoundError:
         logger.critical(f"CIK file not found at {args.cik}. Exiting.")
         exit(1)
+
+    logger.info("--- Entering main processing loop ---")
 
     try:
         while True:

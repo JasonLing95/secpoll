@@ -1,4 +1,4 @@
-# get_logger.py
+# get_logging.py
 import logging
 from typing import Optional
 import logging
@@ -15,28 +15,24 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    configure_logging()
     return logging.getLogger(name)
 
 
 def configure_logging(
-    log_directory: str = '/app/logs',
-    log_file: str = 'sec_filings_poll.log',
+    log_directory: str = "/app/logs",
+    log_file: str = "secpoll.log",
     max_bytes: int = 10 * 1024 * 1024,  # 10 MB
     backup_count: int = 5,
     level: int = logging.INFO,
     console_output: bool = True,
 ) -> None:
 
-    if logging.getLogger().hasHandlers():
-        return
-
-    os.makedirs(log_directory, exist_ok=True)
+    # os.makedirs(log_directory, exist_ok=True)
     log_path = os.path.join(log_directory, log_file)
 
     # Create a custom formatter
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
     # Configure root logger
@@ -59,6 +55,6 @@ def configure_logging(
         logger.addHandler(console_handler)
 
     # Suppress overly verbose logs from libraries
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('psycopg2').setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("psycopg2").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
