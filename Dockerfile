@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY get_logging.py utils.py main.py /app/
+COPY get_logging.py utils.py main.py models.py /app/
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt

@@ -1,13 +1,16 @@
 # utils.py
 import psycopg2
 from psycopg2 import extras
-from get_logging import get_logger
 from edgar import Filing as EdgarFiling
 import datetime as dt
 from bs4 import BeautifulSoup
 import os
 import pandas as pd
 from io import StringIO
+import httpx
+
+from get_logging import get_logger
+from models import SecFilingSchema
 
 
 logger = get_logger(__name__)
@@ -27,6 +30,9 @@ HOLDINGS_COLUMNS = [
     "name_of_issuer",
     "cusip",
 ]
+
+API_AGGREGATOR_PROD_URL = os.getenv("API_AGGREGATOR_PROD_URL")
+API_AGGREGATOR_DEV_URL = os.getenv("API_AGGREGATOR_DEV_URL")
 
 
 def connect_db() -> psycopg2.extensions.connection:
@@ -493,3 +499,38 @@ def insert_holdings_batch(
         )
         conn.commit()
     logger.info("Holdings data inserted successfully")
+
+
+def publish_to_firehose(
+    story_schema: SecFilingSchema,
+    aggregator_urls: list[str] = [API_AGGREGATOR_DEV_URL, API_AGGREGATOR_PROD_URL],
+):
+    """
+    Serializes a SecFilingSchema story and sends it to the aggregators.
+    """
+    logger.info(f"Publishing {story_schema.accession_number} to Redis aggregators.")
+    try:
+        story_data = story_schema.json()
+    except Exception as e:
+        logger.error(f"Unexpected error during story serialization: {e}")
+        return
+
+    with httpx.Client() as client:
+        for url in aggregator_urls:
+            try:
+                response = client.post(
+                    url,
+                    content=story_data,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                logger.info(f"Story published successfully to {url}")
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"HTTP error while publishing story to {url}: {e.response.status_code} - {e.response.content}"
+                )
+            except httpx.RequestError as e:
+                logger.error(f"Request error while publishing story to {url}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error while publishing to {url}: {e}")

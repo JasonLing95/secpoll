@@ -7,6 +7,7 @@ from ratelimit import limits, sleep_and_retry
 import requests
 from threading import Thread
 from lxml import etree  # type: ignore
+import logging
 
 from utils import (
     connect_db,
@@ -16,9 +17,10 @@ from utils import (
     gather_data_with_bs4,
     find_namespaces,
     insert_holdings_batch,
+    publish_to_firehose,
 )
-import logging
 from get_logging import get_logger, configure_logging
+from models import SecFilingSchema
 
 configure_logging(level=logging.INFO)
 logger = get_logger(__name__)
@@ -66,7 +68,7 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
         logger.info(f"Processing filing {accession_number} for CIK {cik}")
 
         # raise Exception if no company found (should not happen)
-        new_filing_id = insert_filing(conn, trimmed_cik, filing)
+        _ = insert_filing(conn, trimmed_cik, filing)
 
         for attachment in filing.attachments:
             if (
@@ -113,6 +115,16 @@ def process_filings(conn, seen: set, filings: CurrentFilings, relevant_ciks: set
 
                 if raw_holdings:
                     insert_holdings_batch(conn, raw_holdings)
+
+        try:
+            logger.info(f"Publishing new filing {accession_number} to firehose...")
+            filing_schema = SecFilingSchema.from_filing(filing)
+            print(filing_schema.json())
+
+            publish_to_firehose(filing_schema)
+
+        except Exception as e:
+            logger.error(f"Failed to publish {accession_number} to firehose: {e}")
 
         seen.add(accession_number)
 
