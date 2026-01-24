@@ -8,6 +8,7 @@ import os
 import pandas as pd
 from io import StringIO
 import httpx
+import traceback
 
 from get_logging import get_logger
 from models import SecFilingSchema
@@ -76,26 +77,25 @@ def insert_filing(
     accession_number = filing.accession_number
 
     try:
-        filing_date = filing.filing_date.isoformat()  # type: ignore
-    except ArithmeticError:
-        filing_date = None
-
-    try:
-        period_of_report = filing.period_of_report  # in str format
-    except ArithmeticError:
-        period_of_report = None
-
-    filing_form_type = filing.form
-
-    try:
-        file_number = filing.file_number  # type: ignore
-    except AttributeError:
-        file_number = None
-
-    try:
-        file_dir = filing.filing_directory.name
-    except ArithmeticError:
-        file_dir = None
+        filing_date = (
+            filing.filing_date.isoformat() if hasattr(filing, "filing_date") else None
+        )
+        period_of_report = (
+            filing.period_of_report if hasattr(filing, "period_of_report") else None
+        )
+        filing_form_type = filing.form
+        file_number = getattr(filing, "file_number", None)
+        file_dir = (
+            filing.filing_directory.name
+            if hasattr(filing, "filing_directory")
+            else None
+        )
+    except Exception as e:
+        logger.error(f"❌ Error extracting metadata for {accession_number}: {e}")
+        logger.error(
+            traceback.format_exc()
+        )  # Logs the exact line in extraction that failed
+        raise
 
     try:
         # Get company_id from database
@@ -106,9 +106,6 @@ def insert_filing(
             company_id_result = cur.fetchone()
 
             if not company_id_result:
-                logger.info(f"Error: Company with CIK {trimmed_cik} not found.")
-                # this should raise an error because technically the CIK should exist
-
                 raise ValueError(f"Company with CIK {trimmed_cik} not found.")
 
             company_id = company_id_result[0]
@@ -137,6 +134,7 @@ def insert_filing(
             )
 
             # Step 4: Execute the query within a cursor block.
+            logger.debug(f"Executing insert with params: {params}")
             cur.execute(query, params)
             new_filing_id = cur.fetchone()[0]  # type: ignore
 
@@ -150,10 +148,17 @@ def insert_filing(
             return new_filing_id
 
     except psycopg2.Error as e:
-        logger.error(f"PostgreSQL Error: {e}")
         conn.rollback()
 
-        raise Exception(f"Error inserting filing {accession_number}: {str(e)}")
+        logger.exception(
+            f"PostgreSQL Database Error during filing insert ({accession_number})"
+        )
+        raise Exception(
+            f"Database error for {accession_number}: {e.pgcode} - {e.pgerror}"
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in insert_filing for {accession_number}")
+        raise
 
 
 def find_namespaces(tree):
