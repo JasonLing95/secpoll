@@ -8,6 +8,7 @@ import requests
 from threading import Thread
 from lxml import etree  # type: ignore
 import logging
+import httpx
 
 from utils import (
     connect_db,
@@ -184,22 +185,37 @@ def main():
 
     try:
         while True:
-            # Clear the cache to ensure fresh data is fetched
-            get_current_entries_on_page.cache_clear()
+            try:
+                # Clear the cache to ensure fresh data is fetched
+                get_current_entries_on_page.cache_clear()
 
-            new_filings = get_current_filings(form="13F-HR")
-            logger.info(f"Fetched {len(new_filings)} new filings")
-            new_filings_a = get_current_filings(form="13F-HR/A")
-            logger.info(f"Fetched {len(new_filings_a)} new filings")
-            new_filings_aa = get_current_filings(form="13F-HR/A/A")
-            logger.info(f"Fetched {len(new_filings_aa)} new filings")
+                new_filings = get_current_filings(form="13F-HR")
+                logger.info(f"Fetched {len(new_filings)} new filings")
+                new_filings_a = get_current_filings(form="13F-HR/A")
+                logger.info(f"Fetched {len(new_filings_a)} new filings")
+                new_filings_aa = get_current_filings(form="13F-HR/A/A")
+                logger.info(f"Fetched {len(new_filings_aa)} new filings")
 
-            process_filings(conn, seen_filings, new_filings, relevant_ciks)
-            process_filings(conn, seen_filings, new_filings_a, relevant_ciks)
-            process_filings(conn, seen_filings, new_filings_aa, relevant_ciks)
+                process_filings(conn, seen_filings, new_filings, relevant_ciks)
+                process_filings(conn, seen_filings, new_filings_a, relevant_ciks)
+                process_filings(conn, seen_filings, new_filings_aa, relevant_ciks)
 
-            logger.info("Sleeping for 15 seconds")
-            time.sleep(15)
+                logger.info("Sleeping for 15 seconds")
+                time.sleep(15)
+
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "SEC Network Timeout (httpx.ReadTimeout). Backing off for 60 seconds..."
+                )
+                time.sleep(60)
+                continue  # Skips back to the top of the while loop
+
+            except Exception as e:
+                logger.error(f"Unexpected error during fetch loop: {str(e)}")
+                # Even for other random errors, don't crash. Just wait and retry.
+                logger.info("Backing off for 60 seconds before retrying...")
+                time.sleep(60)
+                continue
 
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
@@ -207,8 +223,11 @@ def main():
 
 
 if __name__ == "__main__":
-
-    # User Agent
-    set_identity(os.getenv("SEC_IDENTITY", "c90d56807e6b.company@access.com"))
-
-    main()
+    try:
+        set_identity(os.getenv("SEC_IDENTITY", "c90d56807e6b.company@access.com"))
+        main()
+    except Exception as e:
+        logger.error(f"FATAL ERROR: {e}")
+        exit(1)  # Force a non-zero exit code so Docker knows it crashed
+    finally:
+        logger.warning("Script reached the end of execution unexpectedly!")
